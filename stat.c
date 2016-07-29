@@ -1255,6 +1255,64 @@ static struct json_object *show_thread_status_json(struct thread_stat *ts,
 		}
 	}
 
+	/* steady state detection; move this behind json+? */
+	if (ts->ss) {
+		struct json_object *data;
+		struct json_array *iops, *bw;
+		struct steadystate_data *ss = ts->ss;
+		unsigned long long sum_iops, sum_bw;
+		double mean_iops, mean_bw;
+		int i, j, k;
+		char ss_buf[64];
+
+		snprintf(ss_buf, sizeof(ss_buf), "%s%s:%f%s",
+			ss->check_iops ? "iops" : "bw",
+			ss->check_slope ? "_slope" : "",
+			(float) ss->limit,
+			ss->pct ? "%" : "");
+
+		tmp = json_create_object();
+		json_object_add_value_object(root, "steadystate", tmp);
+		json_object_add_value_string(tmp, "ss", ss_buf);
+		json_object_add_value_int(tmp, "duration", (int)ss->dur);
+		json_object_add_value_int(tmp, "steadystate_ramptime", ss->ramp_time / 1000000L);
+		json_object_add_value_int(tmp, "attained", ss->attained);
+
+		snprintf(ss_buf, sizeof(ss_buf), "%f%s", (float) ss->criterion, ss->pct ? "%" : "");
+		json_object_add_value_string(tmp, "criterion", ss_buf);
+		json_object_add_value_float(tmp, "max_deviation", ss->deviation);
+		json_object_add_value_float(tmp, "slope", ss->slope);
+
+		data = json_create_object();
+		json_object_add_value_object(tmp, "data", data);
+		bw = json_create_array();
+		iops = json_create_array();
+
+		/*
+		** if ss was attained or the buffer is not full,
+		** ss->head points to the first element in the list.
+		** otherwise it actually points to the second element
+		** in the list
+		*/
+		if (ss->attained || ss->sum_y == 0)
+			j = ss->head;
+		else
+			j = ss->head == 0 ? ss->dur - 1 : ss->head - 1;
+		for (i = 0, sum_iops = 0, sum_bw = 0; i < ss->dur; i++) {
+			k = (j + i) % ss->dur;
+			sum_bw += ss->bw_data[k];
+			sum_iops += ss->iops_data[k];
+			json_array_add_value_int(bw, ss->bw_data[k]);
+			json_array_add_value_int(iops, ss->iops_data[k]);
+		}
+		mean_bw = (double) sum_bw / ss->dur;
+		mean_iops = (double) sum_iops / ss->dur;
+		json_object_add_value_float(data, "bw_mean", mean_bw);
+		json_object_add_value_float(data, "iops_mean", mean_iops);
+		json_object_add_value_array(data, "iops", iops);
+		json_object_add_value_array(data, "bw", bw);
+	}
+
 	return root;
 }
 
@@ -1578,6 +1636,11 @@ void __show_run_stats(void)
 			ts->block_infos[k] = td->ts.block_infos[k];
 
 		sum_thread_stats(ts, &td->ts, idx == 1);
+
+		if (td->o.ss_dur)
+			ts->ss = &td->ss;
+		else
+			ts->ss = NULL;
 	}
 
 	for (i = 0; i < nr_ts; i++) {
